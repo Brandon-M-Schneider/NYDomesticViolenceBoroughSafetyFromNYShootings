@@ -1,0 +1,144 @@
+---
+title: "NYPD Historical Shooting Incident Data Analysis"
+author: "B.Schneider"
+date: "2022-10-09"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r readME, include=FALSE}
+# Import tidyverse, lubridate, and timetk, dplyr, and zoo packages
+library(tidyverse)
+library(lubridate)
+library(timetk)
+library(dplyr)
+library(zoo)
+```
+
+# Overview
+New York City is subject to a variety of shooting related incidents based on a plethora of motives and underlying consequences. This markdown looks to explore some of the bases of these crimes in correlations to Domestic Violence and the time of day of these event.
+
+\  
+\  
+\  
+\  
+
+```{r getRawData, echo=FALSE}
+# Import dataset to RStudio. Original from City Gov. Repository. Modified spreadsheet to account for location nuances listed as well.
+datasetURL <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv"
+filledDataSetURL <- "https://bms-misc-public.s3.amazonaws.com/NYPD_Shooting_Incident_Data__Historic_Location_Fill_Final.csv"
+allRawData = read_csv(filledDataSetURL)
+```
+
+```{r tidyData, echo=FALSE}
+#25,596 rows
+# allRawData 
+
+# Groups Time of Occurrence into Night, Morning, Afternoon, or Evening.
+groupedTiming <- allRawData %>%
+  mutate(TIME_GROUPING = case_when(OCCUR_TIME %>% between_time("00:00:00", "05:59:59") ~ "NIGHT", OCCUR_TIME %>% between_time("06:00:00", "11:59:59") ~ "MORNING", OCCUR_TIME %>% between_time("12:00:00", "17:59:59") ~ "AFTERNOON", OCCUR_TIME %>% between_time("18:00:00", "23:59:59") ~ "EVENING"))
+
+# Assigns the given event record as a potential, domestically related incident.
+domesticDisputeIndicator <- groupedTiming %>%
+  mutate(HOME_CLASSIFICATION = case_when(LOCATION_DESC == "HOTEL/MOTEL" | LOCATION_DESC == "MULTI DWELL - APT BUILD" | LOCATION_DESC == "MULTI DWELL - PUBLIC HOUS" | LOCATION_DESC == "PVT HOUS" ~ TRUE)) %>%
+  mutate(POTENTIAL_DOMESTIC_DISPUTE = case_when(PERP_SEX == "M" & VIC_SEX =="F" & HOME_CLASSIFICATION == TRUE ~ TRUE , PERP_SEX == "F" & VIC_SEX == "M" & HOME_CLASSIFICATION == TRUE ~ TRUE))
+
+groupedDates <- domesticDisputeIndicator %>%
+  mutate(OCCUR_YEAR = year(mdy(OCCUR_DATE)))
+
+# Tidies geo-location data to remove parallel Latitude and Longitude fields, as well as Precinct and Jurisdiction Code.
+trimmedFields <- groupedDates %>%
+  select(-c(PRECINCT, JURISDICTION_CODE, OCCUR_TIME)) %>%
+  select(c(OCCUR_YEAR, TIME_GROUPING, BORO, VIC_AGE_GROUP, VIC_SEX, VIC_RACE, STATISTICAL_MURDER_FLAG, POTENTIAL_DOMESTIC_DISPUTE)) %>%
+  count(OCCUR_YEAR, BORO, TIME_GROUPING, VIC_AGE_GROUP, VIC_SEX, VIC_RACE, STATISTICAL_MURDER_FLAG, POTENTIAL_DOMESTIC_DISPUTE, name = "N_COUNT") %>%
+  arrange(desc(OCCUR_YEAR))
+
+```
+
+``` {r TotalByRace, echo = FALSE}
+totals_by_race <- trimmedFields %>%
+  group_by(OCCUR_YEAR, VIC_RACE, STATISTICAL_MURDER_FLAG) %>%
+  summarize(TOTAL = sum(N_COUNT)) %>%
+  select(OCCUR_YEAR, VIC_RACE, STATISTICAL_MURDER_FLAG, TOTAL)
+
+race_total_graph <- ggplot(data=totals_by_race, aes(x=OCCUR_YEAR, y=TOTAL, fill=VIC_RACE)) +
+  geom_bar(stat="identity") + ggtitle("Number of Shooting Victims Grouped By Victim Demographic") + xlab("Year") + ylab("Total Victims")
+race_total_graph
+```
+
+## Motives
+Gun related incidents have nearly doubled since the beginning of the COVID-19 pandemic, with lock down orders following from government officials shortly thereafter. Logs grouped by the **victims of gun related incidents** display a majority of victims heavily in the **Black** demographic across the dataset's range. *(Jan. 2006 - Dec. 2021)*
+
+``` {r TotalDeathsByVictimDemo, echo=FALSE, out.width = "50%"}
+# Groups records by victims of a domestic dispute
+totals_by_domestic_dispute <- trimmedFields %>%
+  group_by(OCCUR_YEAR, VIC_RACE, POTENTIAL_DOMESTIC_DISPUTE) %>%
+  summarize(TOTAL = sum(N_COUNT)) %>%
+  select(OCCUR_YEAR, VIC_RACE, POTENTIAL_DOMESTIC_DISPUTE, TOTAL)
+totals_by_domestic_dispute <- totals_by_domestic_dispute %>% filter(POTENTIAL_DOMESTIC_DISPUTE == TRUE)
+
+# Histogram of victims of a domestic dispute by race.
+ggplot(data=totals_by_domestic_dispute, aes(x=OCCUR_YEAR, y=TOTAL, fill=VIC_RACE)) +
+  geom_bar(stat="identity") + ggtitle("Victims of Domestic Violence") + xlab("Year") + ylab("Total Victims")
+
+# Linear regression model of total events with murderous intent correlated against time.
+myPlot <- plot(TOTAL ~ OCCUR_YEAR, data = totals_by_domestic_dispute, col = "red")
+mod <- lm(TOTAL ~ OCCUR_YEAR, data = totals_by_domestic_dispute)
+abline(mod)
+```
+
+## Domestically Ignited
+The histogram *(left)* and linear regression model *(right)* above show the amount of cases where the following parameters were true.
+
+* The Perpetrator was motivated with committing premeditated murder.
+* The Perpetrator and Victim were of opposite genders.
+* The Event took place in a home environment (shared housing, apartment, private house, hotel room)
+
+**Meeting all of these conditionals flags the victim as a victim of a domestically aggregated event.** A noticeable spike in 2020 demonstrates an increase in domestic violence during lock down proceedings, however a **regressive analysis shows a marginal, negative correlation of domestically related occurrences.** Note that each plot point represents the total of these by the victim's race.
+
+\    
+\  
+\  
+\  
+\  
+\  
+\  
+\  
+\  
+\  
+\  
+\  
+
+```{r eventsByBorough, echo=FALSE}
+
+totals_by_time_grouping <- trimmedFields %>%
+  group_by(OCCUR_YEAR, BORO, TIME_GROUPING) %>%
+  summarize(TOTAL = sum(N_COUNT)) %>%
+  select(OCCUR_YEAR, BORO, TIME_GROUPING, TOTAL)
+
+ggplot(data=totals_by_time_grouping, aes(x=BORO, y=TOTAL, fill=TIME_GROUPING)) + geom_bar(stat="identity") + ggtitle("Shootings Based on Time of Day") + xlab("Borough") + ylab("Total Incidents")
+  
+```
+
+
+## Time Matters
+The events per borough, regardless of murderous intent, are grouped here from *(Jan. 2006 - Dec. 2021)*. Most incidents occur in the evening within **Brooklyn.** Time is grouped into one of four categories when the event is time stamped.
+
+* Night (12AM - 5:59:59AM)
+* Morning (6:00:00AM - 11:59:59AM)
+* Afternoon (12:00:00PM - 5:59:59PM)
+* Evening (6:00:00PM - 11:59:59PM)
+
+### A Note on Bias
+There are few facets of bias that exist in this analysis. Registering an event as domestic violence is based on a set of parameters that contain a minute margin of incidents deemed purely coincidental to be assigned as a domestic event. This bias is minimized by aggregating the assignment of a victim as a target of domestic violence across several conditionals. To prevent this value from being delimited due to a large subset of incidents excluding the location of the event in reporting, location data was first reviewed by the coordinates listed for each incident in the dataset and checked for matches in a lookup on the raw dataset. Should a preexisting record that contains the exact coordinates of the queried incident be located with a notnull location description, that location description updates the null location with a copy of its description name.
+
+Time is also grouped in relative standard practice of the range each classification holds. These time groupings are listed in six hour blocks so that each block contain the same amount of hours across a given day.
+
+``` {r SessionInfo, include=FALSE}
+sessionInfo()
+```
